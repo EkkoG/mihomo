@@ -9,7 +9,9 @@ import (
 	"net"
 	"net/netip"
 	"runtime"
+	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/metacubex/mihomo/component/ca"
@@ -36,16 +38,19 @@ type Tailscale struct {
 	option      TailscaleOption
 	ctx         context.Context
 	cancel      context.CancelFunc
+	lifecycleMu sync.Mutex
 	startOnce   sync.Once
 	startErr    error
 
-	backendInitOnce sync.Once
-	backendInitCh   chan struct{}
-	backendInitErr  error
+	backendInit *tailscaleBackendInit
 
 	serverStarted bool
 
 	unregisterDNSResolver func()
+
+	restartInFlight atomic.Bool
+	failureCount    atomic.Int32
+	lastRestart     time.Time
 }
 
 type TailscaleOption struct {
@@ -62,6 +67,17 @@ type TailscaleOption struct {
 	ExitNode               string `proxy:"exit-node,omitempty"`
 	ExitNodeAllowLANAccess *bool  `proxy:"exit-node-allow-lan-access,omitempty"`
 }
+
+type tailscaleBackendInit struct {
+	once sync.Once
+	ch   chan struct{}
+	err  error
+}
+
+const (
+	tailscaleRecoverableFailureThreshold = 3
+	tailscaleRestartMinInterval          = time.Minute
+)
 
 func init() {
 	hostinfo.RegisterHostinfoNewHook(func(hi *tailcfg.Hostinfo) {
@@ -117,51 +133,64 @@ func NewTailscale(option TailscaleOption) (*Tailscale, error) {
 			RoutingMark:  option.RoutingMark,
 			Prefer:       option.IPVersion,
 		}),
-		option:        option,
-		ctx:           ctx,
-		cancel:        cancel,
-		backendInitCh: make(chan struct{}),
+		option:      option,
+		ctx:         ctx,
+		cancel:      cancel,
+		backendInit: newTailscaleBackendInit(),
 	}
 	outbound.dialer = option.NewDialer(outbound.DialOptions())
-	outbound.server = &tsnet.Server{
-		Dir:                  option.StateDir,
-		Hostname:             option.Hostname,
-		AuthKey:              option.AuthKey,
-		ControlURL:           option.ControlURL,
-		Ephemeral:            option.Ephemeral,
-		SystemDialer:         outbound.dialer.DialContext,
-		SystemPacketListener: tailscalePacketListener{dialer: outbound.dialer}.ListenPacket,
-		ExtraRootCAs:         ca.GetCertPool(),
-		LookupHook:           tailscaleLookupHook,
-		UserLogf: func(format string, args ...any) {
-			log.Infoln("[Tailscale](%s) %s", option.Name, fmt.Sprintf(format, args...))
-		},
-		Logf: func(format string, args ...any) {
-			log.Debugln("[Tailscale](%s) %s", option.Name, fmt.Sprintf(format, args...))
-		},
-	}
+	outbound.server = outbound.newServer()
 	dnsTransport := tailscaleDNSTransport{tailscale: outbound}
 	outbound.dnsResolver = dns.NewResolverFromClient(dnsTransport)
 	outbound.unregisterDNSResolver = dns.RegisterTailscaleDnsClient(option.Name, dnsTransport)
 	return outbound, nil
 }
 
+func newTailscaleBackendInit() *tailscaleBackendInit {
+	return &tailscaleBackendInit{ch: make(chan struct{})}
+}
+
+func (t *Tailscale) newServer() *tsnet.Server {
+	return &tsnet.Server{
+		Dir:                  t.option.StateDir,
+		Hostname:             t.option.Hostname,
+		AuthKey:              t.option.AuthKey,
+		ControlURL:           t.option.ControlURL,
+		Ephemeral:            t.option.Ephemeral,
+		SystemDialer:         t.dialer.DialContext,
+		SystemPacketListener: tailscalePacketListener{dialer: t.dialer}.ListenPacket,
+		ExtraRootCAs:         ca.GetCertPool(),
+		LookupHook:           tailscaleLookupHook,
+		UserLogf: func(format string, args ...any) {
+			log.Infoln("[Tailscale](%s) %s", t.option.Name, fmt.Sprintf(format, args...))
+		},
+		Logf: func(format string, args ...any) {
+			log.Debugln("[Tailscale](%s) %s", t.option.Name, fmt.Sprintf(format, args...))
+		},
+	}
+}
+
 func (t *Tailscale) start() error {
+	t.lifecycleMu.Lock()
+	defer t.lifecycleMu.Unlock()
+
 	t.startOnce.Do(func() {
-		if err := t.server.Start(); err != nil {
+		init := t.backendInit
+		server := t.server
+		if err := server.Start(); err != nil {
 			t.startErr = err
-			t.setBackendInitialized(err)
+			setTailscaleBackendInitialized(init, err)
 			return
 		}
 		t.serverStarted = true
 		ctx, cancel := context.WithTimeout(t.ctx, 30*time.Second)
 		defer cancel()
-		if err := t.applyPrefs(ctx); err != nil {
+		if err := t.applyPrefs(ctx, server); err != nil {
 			t.startErr = err
-			t.setBackendInitialized(err)
+			setTailscaleBackendInitialized(init, err)
 			return
 		}
-		go t.watchBackendState()
+		go t.watchBackendState(server, init)
 	})
 	return t.startErr
 }
@@ -173,15 +202,15 @@ func (t *Tailscale) ensureStarted(ctx context.Context) error {
 	return t.waitBackendInitialized(ctx)
 }
 
-func (t *Tailscale) watchBackendState() {
-	lc, err := t.server.LocalClient()
+func (t *Tailscale) watchBackendState(server *tsnet.Server, init *tailscaleBackendInit) {
+	lc, err := server.LocalClient()
 	if err != nil {
-		t.setBackendInitialized(err)
+		setTailscaleBackendInitialized(init, err)
 		return
 	}
 	watcher, err := lc.WatchIPNBus(t.ctx, ipn.NotifyInitialState)
 	if err != nil {
-		t.setBackendInitialized(err)
+		setTailscaleBackendInitialized(init, err)
 		return
 	}
 	defer watcher.Close()
@@ -191,7 +220,7 @@ func (t *Tailscale) watchBackendState() {
 	for {
 		n, err := watcher.Next()
 		if err != nil {
-			t.setBackendInitialized(err)
+			setTailscaleBackendInitialized(init, err)
 			return
 		}
 		if n.State == nil {
@@ -199,14 +228,14 @@ func (t *Tailscale) watchBackendState() {
 		}
 
 		if *n.State != ipn.NoState && !backendInitialized {
-			t.setBackendInitialized(nil)
+			setTailscaleBackendInitialized(init, nil)
 			backendInitialized = true
 			if !exitNodeNeedsStatus {
 				return
 			}
 		}
 		if exitNodeNeedsStatus && *n.State == ipn.Running {
-			if err := t.applyExitNodePrefs(t.ctx); err != nil {
+			if err := t.applyExitNodePrefs(t.ctx, server); err != nil {
 				log.Warnln("[Tailscale](%s) set exit node failed: %v", t.Name(), err)
 			}
 			return
@@ -214,17 +243,21 @@ func (t *Tailscale) watchBackendState() {
 	}
 }
 
-func (t *Tailscale) setBackendInitialized(err error) {
-	t.backendInitOnce.Do(func() {
-		t.backendInitErr = err
-		close(t.backendInitCh)
+func setTailscaleBackendInitialized(init *tailscaleBackendInit, err error) {
+	init.once.Do(func() {
+		init.err = err
+		close(init.ch)
 	})
 }
 
 func (t *Tailscale) waitBackendInitialized(ctx context.Context) error {
+	t.lifecycleMu.Lock()
+	init := t.backendInit
+	t.lifecycleMu.Unlock()
+
 	select {
-	case <-t.backendInitCh:
-		return t.backendInitErr
+	case <-init.ch:
+		return init.err
 	case <-ctx.Done():
 		return ctx.Err()
 	case <-t.ctx.Done():
@@ -232,7 +265,7 @@ func (t *Tailscale) waitBackendInitialized(ctx context.Context) error {
 	}
 }
 
-func (t *Tailscale) applyPrefs(ctx context.Context) error {
+func (t *Tailscale) applyPrefs(ctx context.Context, server *tsnet.Server) error {
 	mp, err := buildTailscaleMaskedPrefs(t.option)
 	if err != nil {
 		return err
@@ -240,7 +273,7 @@ func (t *Tailscale) applyPrefs(ctx context.Context) error {
 	if mp == nil {
 		return nil
 	}
-	lc, err := t.server.LocalClient()
+	lc, err := server.LocalClient()
 	if err != nil {
 		return err
 	}
@@ -248,11 +281,11 @@ func (t *Tailscale) applyPrefs(ctx context.Context) error {
 	return err
 }
 
-func (t *Tailscale) applyExitNodePrefs(ctx context.Context) error {
+func (t *Tailscale) applyExitNodePrefs(ctx context.Context, server *tsnet.Server) error {
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 
-	lc, err := t.server.LocalClient()
+	lc, err := server.LocalClient()
 	if err != nil {
 		return err
 	}
@@ -309,19 +342,33 @@ func tailscaleExitNodeNeedsStatus(option TailscaleOption) bool {
 	return !ok
 }
 
+func (t *Tailscale) currentServer() *tsnet.Server {
+	t.lifecycleMu.Lock()
+	defer t.lifecycleMu.Unlock()
+	return t.server
+}
+
 func tailscaleLookupHook(ctx context.Context, host string) ([]netip.Addr, error) {
 	return resolver.LookupIPWithResolver(ctx, host, resolver.ProxyServerHostResolver)
 }
 
 func (t *Tailscale) DialContext(ctx context.Context, metadata *C.Metadata) (_ C.Conn, err error) {
 	if err = t.ensureStarted(ctx); err != nil {
+		t.recordFailure(err)
 		return nil, err
 	}
-	netStack, err := t.server.Netstack(ctx)
+	server := t.currentServer()
+	if server == nil {
+		err = errors.New("tailscale server is nil")
+		t.recordFailure(err)
+		return nil, err
+	}
+	netStack, err := server.Netstack(ctx)
 	if err != nil {
+		t.recordFailure(err)
 		return nil, err
 	}
-	v4, v6 := t.server.TailscaleIPs()
+	v4, v6 := server.TailscaleIPs()
 	options := t.DialOptions()
 	options = append(options, dialer.WithResolver(t.dnsResolver))
 	options = append(options, dialer.WithNetDialer(dialer.NetDialerFunc(func(ctx context.Context, network, address string) (net.Conn, error) {
@@ -342,33 +389,49 @@ func (t *Tailscale) DialContext(ctx context.Context, metadata *C.Metadata) (_ C.
 	var conn net.Conn
 	conn, err = dialer.NewDialer(options...).DialContext(ctx, "tcp", metadata.RemoteAddress())
 	if err != nil {
+		t.recordFailure(err)
 		return nil, err
 	}
 	if conn == nil {
-		return nil, errors.New("conn is nil")
+		err = errors.New("conn is nil")
+		t.recordFailure(err)
+		return nil, err
 	}
+	t.recordSuccess()
 	return NewConn(conn, t), nil
 }
 
 func (t *Tailscale) ListenPacketContext(ctx context.Context, metadata *C.Metadata) (_ C.PacketConn, err error) {
 	if err = t.ensureStarted(ctx); err != nil {
+		t.recordFailure(err)
 		return nil, err
 	}
 	if err = t.ResolveUDP(ctx, metadata); err != nil {
+		t.recordFailure(err)
 		return nil, err
 	}
-	v4, v6 := t.server.TailscaleIPs()
+	server := t.currentServer()
+	if server == nil {
+		err = errors.New("tailscale server is nil")
+		t.recordFailure(err)
+		return nil, err
+	}
+	v4, v6 := server.TailscaleIPs()
 	src := v4
 	if metadata.DstIP.Is6() {
 		src = v6
 	}
-	pc, err := t.server.ListenPacket("udp", net.JoinHostPort(src.String(), "0"))
+	pc, err := server.ListenPacket("udp", net.JoinHostPort(src.String(), "0"))
 	if err != nil {
+		t.recordFailure(err)
 		return nil, err
 	}
 	if pc == nil {
-		return nil, errors.New("packetConn is nil")
+		err = errors.New("packetConn is nil")
+		t.recordFailure(err)
+		return nil, err
 	}
+	t.recordSuccess()
 	return newPacketConn(pc, t), nil
 }
 
@@ -398,6 +461,7 @@ func (t tailscaleDNSTransport) ExchangeContext(ctx context.Context, msg *D.Msg) 
 		return nil, errors.New("should have one question at least")
 	}
 	if err := t.tailscale.ensureStarted(ctx); err != nil {
+		t.tailscale.recordFailure(err)
 		return nil, err
 	}
 	q := msg.Question[0]
@@ -405,12 +469,20 @@ func (t tailscaleDNSTransport) ExchangeContext(ctx context.Context, msg *D.Msg) 
 	if !ok {
 		return nil, fmt.Errorf("unsupported query type: %d", q.Qtype)
 	}
-	lc, err := t.tailscale.server.LocalClient()
+	server := t.tailscale.currentServer()
+	if server == nil {
+		err := errors.New("tailscale server is nil")
+		t.tailscale.recordFailure(err)
+		return nil, err
+	}
+	lc, err := server.LocalClient()
 	if err != nil {
+		t.tailscale.recordFailure(err)
 		return nil, err
 	}
 	response, _, err := lc.QueryDNS(ctx, q.Name, qtypeName)
 	if err != nil {
+		t.tailscale.recordFailure(err)
 		return nil, err
 	}
 	var responseMsg D.Msg
@@ -418,6 +490,7 @@ func (t tailscaleDNSTransport) ExchangeContext(ctx context.Context, msg *D.Msg) 
 		return nil, err
 	}
 	responseMsg.Id = msg.Id
+	t.tailscale.recordSuccess()
 	return &responseMsg, nil
 }
 
@@ -436,13 +509,94 @@ func (t *Tailscale) Close() error {
 	if t.unregisterDNSResolver != nil {
 		t.unregisterDNSResolver()
 	}
-	t.startOnce.Do(func() {
-		t.startErr = errors.New("tailscale outbound closed")
-	})
-	if t.server != nil && t.serverStarted { // tsnet.Server.Close() must not be called before or concurrently with Start.
-		return t.server.Close()
+	t.lifecycleMu.Lock()
+	t.startErr = errors.New("tailscale outbound closed")
+	init := t.backendInit
+	server := t.server
+	serverStarted := t.serverStarted
+	t.serverStarted = false
+	t.lifecycleMu.Unlock()
+	setTailscaleBackendInitialized(init, t.startErr)
+	if server != nil && serverStarted { // tsnet.Server.Close() must not be called before or concurrently with Start.
+		return server.Close()
 	}
 	return nil
+}
+
+func (t *Tailscale) recordSuccess() {
+	t.failureCount.Store(0)
+}
+
+func (t *Tailscale) recordFailure(err error) {
+	if !isTailscaleRecoverableError(err) {
+		return
+	}
+	if t.failureCount.Add(1) < tailscaleRecoverableFailureThreshold {
+		return
+	}
+	t.scheduleRestart(err.Error())
+}
+
+func isTailscaleRecoverableError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+	var netErr net.Error
+	if errors.As(err, &netErr) && netErr.Timeout() {
+		return true
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "i/o timeout") ||
+		strings.Contains(msg, "no derp connection") ||
+		strings.Contains(msg, "use of closed network connection")
+}
+
+func (t *Tailscale) scheduleRestart(reason string) {
+	if !t.restartInFlight.CompareAndSwap(false, true) {
+		return
+	}
+	go t.restart(reason)
+}
+
+func (t *Tailscale) restart(reason string) {
+	defer t.restartInFlight.Store(false)
+
+	t.lifecycleMu.Lock()
+	if t.ctx.Err() != nil {
+		t.lifecycleMu.Unlock()
+		return
+	}
+	if time.Since(t.lastRestart) < tailscaleRestartMinInterval {
+		t.failureCount.Store(0)
+		t.lifecycleMu.Unlock()
+		return
+	}
+	log.Warnln("[Tailscale](%s) restarting after recoverable failures: %s", t.Name(), reason)
+	oldServer := t.server
+	oldServerStarted := t.serverStarted
+	t.server = t.newServer()
+	t.serverStarted = false
+	t.startOnce = sync.Once{}
+	t.startErr = nil
+	t.backendInit = newTailscaleBackendInit()
+	t.failureCount.Store(0)
+	t.lastRestart = time.Now()
+	t.lifecycleMu.Unlock()
+
+	if oldServer != nil && oldServerStarted {
+		if err := oldServer.Close(); err != nil {
+			log.Warnln("[Tailscale](%s) close old server failed: %v", t.Name(), err)
+		}
+	}
+
+	ctx, cancel := context.WithTimeout(t.ctx, 30*time.Second)
+	defer cancel()
+	if err := t.ensureStarted(ctx); err != nil {
+		log.Warnln("[Tailscale](%s) restart failed: %v", t.Name(), err)
+	}
 }
 
 type tailscalePacketListener struct {
