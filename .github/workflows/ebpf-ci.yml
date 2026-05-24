@@ -12,65 +12,36 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  # ---- Linux (eBPF 编译 + Go build + test) ----
-  linux-amd64:
+  # ---- Linux (eBPF 编译 + Go build，测试仅 amd64) ----
+  linux:
     runs-on: ubuntu-latest
-    env: { CGO_ENABLED: 0, GOTOOLCHAIN: auto }
+    strategy:
+      matrix:
+        target: [amd64, '386', armv7, arm64, mipsle, riscv64]
+    env:
+      CGO_ENABLED: 0
+      GOTOOLCHAIN: auto
     steps:
     - uses: actions/checkout@v6
     - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c
-      with: { go-download-base-url: 'https://github.com/MetaCubeX/go/releases/download/build', go-version: '1.26' }
+      with:
+        go-download-base-url: 'https://github.com/MetaCubeX/go/releases/download/build'
+        go-version: '1.26'
     - run: sudo apt-get update && sudo apt-get install -y clang libbpf-dev
     - run: make ebpf CLANG=clang
-    - run: go build -v -trimpath -ldflags "-w -s -buildid=" -tags with_gvisor
-    - run: go test ./... -count=1
-
-  linux-arm64:
-    runs-on: ubuntu-24.04-arm
-    env: { CGO_ENABLED: 0, GOTOOLCHAIN: auto }
-    steps:
-    - uses: actions/checkout@v6
-    - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c
-      with: { go-download-base-url: 'https://github.com/MetaCubeX/go/releases/download/build', go-version: '1.26' }
-    - run: sudo apt-get update && sudo apt-get install -y clang libbpf-dev
-    - run: make ebpf CLANG=clang
-    - run: go build -v -trimpath -ldflags "-w -s -buildid=" -tags with_gvisor
-
-  linux-386:
-    runs-on: ubuntu-latest
-    env: { GOARCH: '386', CGO_ENABLED: 0, GOTOOLCHAIN: auto }
-    steps:
-    - uses: actions/checkout@v6
-    - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c
-      with: { go-download-base-url: 'https://github.com/MetaCubeX/go/releases/download/build', go-version: '1.26' }
-    - run: go build -v -trimpath -ldflags "-w -s -buildid="
-
-  linux-armv7:
-    runs-on: ubuntu-latest
-    env: { GOARCH: arm, GOARM: '7', CGO_ENABLED: 0, GOTOOLCHAIN: auto }
-    steps:
-    - uses: actions/checkout@v6
-    - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c
-      with: { go-download-base-url: 'https://github.com/MetaCubeX/go/releases/download/build', go-version: '1.26' }
-    - run: go build -v -trimpath -ldflags "-w -s -buildid="
-
-  linux-mipsle:
-    runs-on: ubuntu-latest
-    env: { GOARCH: mipsle, GOMIPS: softfloat, CGO_ENABLED: 0, GOTOOLCHAIN: auto }
-    steps:
-    - uses: actions/checkout@v6
-    - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c
-      with: { go-download-base-url: 'https://github.com/MetaCubeX/go/releases/download/build', go-version: '1.26' }
-    - run: go build -v -trimpath -ldflags "-w -s -buildid="
-
-  linux-riscv64:
-    runs-on: ubuntu-latest
-    env: { GOARCH: riscv64, CGO_ENABLED: 0, GOTOOLCHAIN: auto }
-    steps:
-    - uses: actions/checkout@v6
-    - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c
-      with: { go-download-base-url: 'https://github.com/MetaCubeX/go/releases/download/build', go-version: '1.26' }
-    - run: go build -v -trimpath -ldflags "-w -s -buildid="
+    - name: Build
+      run: |
+        case "${{ matrix.target }}" in
+          amd64)   GOARCH=amd64   GOAMD64=v3  go build -v -trimpath -ldflags "-w -s -buildid=" -tags with_gvisor ;;
+          386)     GOARCH=386                  go build -v -trimpath -ldflags "-w -s -buildid=" ;;
+          armv7)   GOARCH=arm    GOARM=7       go build -v -trimpath -ldflags "-w -s -buildid=" ;;
+          arm64)   GOARCH=arm64                go build -v -trimpath -ldflags "-w -s -buildid=" ;;
+          mipsle)  GOARCH=mipsle GOMIPS=softfloat go build -v -trimpath -ldflags "-w -s -buildid=" ;;
+          riscv64) GOARCH=riscv64              go build -v -trimpath -ldflags "-w -s -buildid=" ;;
+        esac
+    - name: Test (amd64 only)
+      if: ${{ matrix.target == 'amd64' }}
+      run: go test ./... -count=1
 
   # ---- macOS (stub 编译) ----
   darwin:
