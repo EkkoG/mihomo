@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/cilium/ebpf"
+	"github.com/cilium/ebpf/asm"
 	"github.com/vishvananda/netlink"
 	"golang.org/x/sys/unix"
 )
@@ -33,7 +34,7 @@ func CheckMain(args []string) {
 	progOK := true
 	prog, err := ebpf.NewProgram(&ebpf.ProgramSpec{
 		Type:         ebpf.SchedCLS,
-		Instructions: ebpf.Instructions{ebpf.Mov.Imm(ebpf.Reg0, 0), ebpf.Return()},
+		Instructions: asm.Instructions{asm.Mov.Imm(asm.R0, 0), asm.Return()},
 		License:      "GPL",
 	})
 	if err != nil {
@@ -73,22 +74,22 @@ func CheckMain(args []string) {
 	}{
 		{"redirect", &ebpf.ProgramSpec{
 			Type: ebpf.SchedCLS,
-			Instructions: ebpf.Instructions{
-				ebpf.Mov.Imm(ebpf.Reg1, 1),
-				ebpf.Mov.Imm(ebpf.Reg2, 0),
-				ebpf.FnRedirect.Call(),
-				ebpf.Return(),
+			Instructions: asm.Instructions{
+				asm.Mov.Imm(asm.R1, 1),
+				asm.Mov.Imm(asm.R2, 0),
+				asm.FnRedirect.Call(),
+				asm.Return(),
 			},
 			License: "GPL",
 		}},
 		{"sk_assign", &ebpf.ProgramSpec{
 			Type: ebpf.SchedCLS,
-			Instructions: ebpf.Instructions{
-				ebpf.Mov.Imm(ebpf.Reg1, 0),
-				ebpf.Mov.Imm(ebpf.Reg2, 0),
-				ebpf.Mov.Imm(ebpf.Reg3, 0),
-				ebpf.FnSkAssign.Call(),
-				ebpf.Return(),
+			Instructions: asm.Instructions{
+				asm.Mov.Imm(asm.R1, 0),
+				asm.Mov.Imm(asm.R2, 0),
+				asm.Mov.Imm(asm.R3, 0),
+				asm.FnSkAssign.Call(),
+				asm.Return(),
 			},
 			License: "GPL",
 		}},
