@@ -4,6 +4,7 @@ package ebpf
 
 import (
 	"fmt"
+	"net"
 	"os"
 	"os/exec"
 	"runtime"
