@@ -217,6 +217,12 @@ jobs:
         echo "CGO_ENABLED=1" >> $GITHUB_ENV
         echo "BUILDTAG=" >> $GITHUB_ENV
 
+    - name: Install eBPF build deps
+      if: ${{ matrix.jobs.goos == 'linux' }}
+      run: |
+        sudo apt-get update && sudo apt-get install -y clang libbpf-dev
+        make ebpf CLANG=clang
+
     - name: Test
       if: ${{ matrix.jobs.test == 'test' }}
       run: |
@@ -230,12 +236,6 @@ jobs:
         sudo apt-get update && sudo apt-get install ca-certificates
         sudo update-ca-certificates
         cp -f /etc/ssl/certs/ca-certificates.crt component/ca/ca-certificates.crt
-
-    - name: Install eBPF build deps
-      if: ${{ matrix.jobs.goos == 'linux' }}
-      run: |
-        sudo apt-get update && sudo apt-get install -y clang libbpf-dev
-        make ebpf CLANG=clang
 
     - name: Build core
       env:
