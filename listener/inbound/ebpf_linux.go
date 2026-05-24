@@ -12,6 +12,7 @@ import (
 	"syscall"
 	"time"
 
+	adapterInbound "github.com/metacubex/mihomo/adapter/inbound"
 	C "github.com/metacubex/mihomo/constant"
 	"github.com/metacubex/mihomo/listener/ebpf"
 	"github.com/metacubex/mihomo/log"
@@ -176,13 +177,13 @@ func (e *Ebpf) createTPROXYListener(addr string, tunnel C.Tunnel) error {
 func (e *Ebpf) handleTCPConn(conn net.Conn, tunnel C.Tunnel) {
 	target := socks5.ParseAddrToSocksAddr(conn.LocalAddr())
 	additions := e.Additions()
-	additions = append(additions, WithInAddr(e.tcpListener.(net.Listener).Addr()))
+	additions = append(additions, adapterInbound.WithInAddr(e.tcpListener.(net.Listener).Addr()))
 
 	if meta := e.lookupMetadata(conn.RemoteAddr(), conn.LocalAddr(), 6); meta != nil {
-		additions = append(additions, WithSrcMac(meta.SrcMac), WithInterfaceIndex(meta.IfIndex))
+		additions = append(additions, adapterInbound.WithSrcMac(meta.SrcMac), adapterInbound.WithInterfaceIndex(meta.IfIndex))
 	}
 
-	tunnel.HandleTCPConn(NewSocket(target, conn, C.EBPF, additions...))
+	tunnel.HandleTCPConn(adapterInbound.NewSocket(target, conn, C.EBPF, additions...))
 }
 
 func (e *Ebpf) handleUDPConn(conn net.PacketConn, tunnel C.Tunnel) {
@@ -206,7 +207,7 @@ func (e *Ebpf) handleUDPConn(conn net.PacketConn, tunnel C.Tunnel) {
 			SrcPort: uint16(udpAddr.Port),
 		}
 		_ = metadata.SetRemoteAddr(conn.LocalAddr())
-		ApplyAdditions(metadata, e.Additions()...)
+		adapterInbound.ApplyAdditions(metadata, e.Additions()...)
 
 		if meta := e.lookupMetadata(addr, conn.LocalAddr(), 17); meta != nil {
 			metadata.SrcMac = meta.SrcMac
