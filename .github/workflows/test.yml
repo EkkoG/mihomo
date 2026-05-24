@@ -62,6 +62,12 @@ jobs:
         run: |
           rm -rf listener/inbound/*_test.go
 
+      - name: Install eBPF build deps
+        if: ${{ runner.os == 'Linux' }}
+        run: |
+          sudo apt-get update && sudo apt-get install -y clang
+          make ebpf CLANG=clang
+
       - name: Test
         run: go test ./... -v -count=1
 

@@ -231,6 +231,12 @@ jobs:
         sudo update-ca-certificates
         cp -f /etc/ssl/certs/ca-certificates.crt component/ca/ca-certificates.crt
 
+    - name: Install eBPF build deps
+      if: ${{ matrix.jobs.goos == 'linux' }}
+      run: |
+        sudo apt-get update && sudo apt-get install -y clang
+        make ebpf CLANG=clang
+
     - name: Build core
       env:
         GOOS: ${{matrix.jobs.goos}}

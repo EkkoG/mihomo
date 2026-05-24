@@ -204,3 +204,17 @@ clean:
 CLANG ?= clang-14
 CFLAGS := -O2 -g -Wall -Werror $(CFLAGS)
 
+# eBPF compilation targets
+EBPF_SRC := listener/ebpf/kern/redirect.c
+EBPF_OUT := listener/ebpf/kern/redirect.o
+EBPF_INCLUDE := /usr/include /usr/include/x86_64-linux-gnu
+
+ebpf: $(EBPF_OUT)
+
+$(EBPF_OUT): $(EBPF_SRC)
+	@echo "  CLANG-BPF  $(EBPF_SRC)"
+	$(CLANG) -O2 -target bpf -c $(EBPF_SRC) -o $(EBPF_OUT) $(addprefix -I,$(EBPF_INCLUDE))
+
+ebpf-clean:
+	rm -f $(EBPF_OUT)
+

@@ -42,6 +42,7 @@ const (
 	MIERU
 	SUDOKU
 	TRUSTTUNNEL
+	EBPF
 	INNER
 )
 
@@ -121,6 +122,8 @@ func (t Type) String() string {
 		return "Sudoku"
 	case TRUSTTUNNEL:
 		return "TrustTunnel"
+	case EBPF:
+		return "EBPF"
 	case INNER:
 		return "Inner"
 	default:
@@ -169,6 +172,8 @@ func ParseType(t string) (*Type, error) {
 		res = SUDOKU
 	case "TRUSTTUNNEL":
 		res = TRUSTTUNNEL
+	case "EBPF":
+		res = EBPF
 	case "INNER":
 		res = INNER
 	default:
@@ -206,6 +211,9 @@ type Metadata struct {
 	SpecialRules string     `json:"specialRules"`
 	RemoteDst    string     `json:"remoteDestination"`
 	DSCP         uint8      `json:"dscp"`
+
+	SrcMac      [6]uint8  `json:"sourceMAC,omitempty"`
+	IfIndex     uint32    `json:"interfaceIndex,omitempty"`
 
 	RawSrcAddr net.Addr `json:"-"`
 	RawDstAddr net.Addr `json:"-"`

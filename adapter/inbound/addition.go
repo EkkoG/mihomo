@@ -70,4 +70,16 @@ func WithDSCP(dscp uint8) Addition {
 	}
 }
 
+func WithSrcMac(mac [6]uint8) Addition {
+	return func(metadata *C.Metadata) {
+		metadata.SrcMac = mac
+	}
+}
+
+func WithInterfaceIndex(ifindex uint32) Addition {
+	return func(metadata *C.Metadata) {
+		metadata.IfIndex = ifindex
+	}
+}
+
 func Placeholder(metadata *C.Metadata) {}

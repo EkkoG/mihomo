@@ -162,7 +162,14 @@ func ParseListener(mapping map[string]any) (C.InboundListener, error) {
 			return nil, err
 		}
 		listener, err = IN.NewTrustTunnel(trusttunnelOption)
-	default:
+	case "ebpf":
+			ebpfOption := &IN.EbpfOption{}
+			err = decoder.Decode(mapping, ebpfOption)
+			if err != nil {
+				return nil, err
+			}
+			listener, err = IN.NewEbpf(ebpfOption)
+		default:
 		return nil, fmt.Errorf("unsupport proxy type: %s", proxyType)
 	}
 	return listener, err
