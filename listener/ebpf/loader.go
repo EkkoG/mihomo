@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"os"
 	"net/netip"
 	"sync"
 	"time"
@@ -193,7 +194,7 @@ func (l *Loader) Attach(ifaces []string) error {
 			},
 		}
 		if err := netlink.QdiscAdd(qdisc); err != nil {
-			if !errors.Is(err, netlink.ErrQdiscExists) {
+			if !os.IsExist(err) {
 				return fmt.Errorf("add clsact to %s: %w", ifaceName, err)
 			}
 		}
