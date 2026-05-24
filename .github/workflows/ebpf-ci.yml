@@ -1,0 +1,77 @@
+name: EBPF-CI
+on:
+  push:
+    paths-ignore:
+      - "docs/**"
+      - "README.md"
+    branches:
+      - Alpha
+  pull_request:
+    branches:
+      - Alpha
+
+concurrency:
+  group: "${{ github.workflow }}-${{ github.ref }}"
+  cancel-in-progress: true
+
+jobs:
+  build-linux:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        goarch: [amd64, arm64, arm]
+        goarm: ['7']
+        exclude:
+          - goarch: arm64
+            goarm: '7'
+          - goarch: amd64
+            goarm: '7'
+    env:
+      CGO_ENABLED: 0
+      GOTOOLCHAIN: auto
+    steps:
+    - uses: actions/checkout@v6
+
+    - name: Set up Go
+      uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c
+      with:
+        go-download-base-url: 'https://github.com/MetaCubeX/go/releases/download/build'
+        go-version: '1.26'
+
+    - name: Install eBPF build deps
+      run: |
+        sudo apt-get update && sudo apt-get install -y clang libbpf-dev
+        make ebpf CLANG=clang
+
+    - name: Build
+      run: |
+        GOARCH=${{ matrix.goarch }} GOARM=${{ matrix.goarm }} \
+          go build -v -trimpath -ldflags "-w -s -buildid="
+
+    - name: Test
+      run: |
+        GOARCH=${{ matrix.goarch }} GOARM=${{ matrix.goarm }} \
+          go test ./... -count=1 -vet=off
+
+  build-other:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        goos: [darwin, windows, freebsd]
+        goarch: [amd64, arm64]
+    env:
+      CGO_ENABLED: 0
+      GOTOOLCHAIN: auto
+    steps:
+    - uses: actions/checkout@v6
+
+    - name: Set up Go
+      uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c
+      with:
+        go-download-base-url: 'https://github.com/MetaCubeX/go/releases/download/build'
+        go-version: '1.26'
+
+    - name: Build
+      run: |
+        GOOS=${{ matrix.goos }} GOARCH=${{ matrix.goarch }} \
+          go build -v -trimpath -ldflags "-w -s -buildid="
