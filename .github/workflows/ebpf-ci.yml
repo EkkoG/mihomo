@@ -82,14 +82,3 @@ jobs:
       with: { go-download-base-url: 'https://github.com/MetaCubeX/go/releases/download/build', go-version: '1.26' }
     - run: GOARCH=${{ matrix.goarch }} go build -v -trimpath -ldflags "-w -s -buildid="
 
-  android:
-    runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        goarch: [arm64]
-    env: { GOOS: android, CGO_ENABLED: 0, GOTOOLCHAIN: auto }
-    steps:
-    - uses: actions/checkout@v6
-    - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c
-      with: { go-download-base-url: 'https://github.com/MetaCubeX/go/releases/download/build', go-version: '1.26' }
-    - run: GOARCH=${{ matrix.goarch }} go build -v -trimpath -ldflags "-w -s -buildid="
