@@ -5,11 +5,11 @@ package ebpf
 import (
 	"fmt"
 	"os"
+	"os/exec"
 	"runtime"
 	"strings"
 
 	"github.com/cilium/ebpf"
-	"github.com/cilium/ebpf/features"
 	"github.com/vishvananda/netlink"
 	"golang.org/x/sys/unix"
 )
@@ -28,51 +28,86 @@ func CheckMain(args []string) {
 		fmt.Printf("  Kernel:  %s\n", release)
 	}
 
-	// 2. Required kernel features
-	fmt.Println("\nBPF kernel features:")
-	checkFeature("  BPF syscall", features.HaveProgramType(ebpf.SchedCLS) == nil)
-	checkFeature("  BPF ringbuf", features.HaveMapType(ebpf.RingBuf) == nil)
-	checkFeature("  BPF LPM trie", features.HaveMapType(ebpf.LPMTrie) == nil)
-	checkFeature("  BPF hash map", features.HaveMapType(ebpf.Hash) == nil)
-	checkFeature("  BPF redirect", features.HaveProgramHelper(ebpf.SchedCLS, unix.BPF_FUNC_redirect) == nil)
-	checkFeature("  BPF sk_assign", features.HaveProgramHelper(ebpf.SchedCLS, unix.BPF_FUNC_sk_assign) == nil)
-	checkFeature("  BPF sk_lookup_tcp", features.HaveProgramHelper(ebpf.SchedCLS, unix.BPF_FUNC_skc_lookup_tcp) == nil)
-	checkFeature("  BPF sk_lookup_udp", features.HaveProgramHelper(ebpf.SchedCLS, unix.BPF_FUNC_sk_lookup_udp) == nil)
-	checkFeature("  BPF ktime_get_ns", features.HaveProgramHelper(ebpf.SchedCLS, unix.BPF_FUNC_ktime_get_ns) == nil)
-
-	// 3. Program load test
-	fmt.Println("\nProgram load test:")
-	loadResult := "OK"
-	prog, err := loadTestProgram()
-	if err != nil {
-		loadResult = fmt.Sprintf("FAIL: %v", err)
-	} else {
-		prog.Close()
-	}
-	fmt.Printf("  Load simple TC program: %s\n", loadResult)
-
-	// 4. Map creation test
-	fmt.Println("\nMap creation test:")
-	mapResult := "OK"
-	m, err := ebpf.NewMap(&ebpf.MapSpec{
-		Type:       ebpf.Hash,
-		KeySize:    4,
-		ValueSize:  4,
-		MaxEntries: 1,
+	// 2. Program load test
+	fmt.Println("\nBPF program load:")
+	progOK := true
+	prog, err := ebpf.NewProgram(&ebpf.ProgramSpec{
+		Type:         ebpf.SchedCLS,
+		Instructions: ebpf.Instructions{ebpf.Mov.Imm(ebpf.Reg0, 0), ebpf.Return()},
+		License:      "GPL",
 	})
 	if err != nil {
-		mapResult = fmt.Sprintf("FAIL: %v", err)
+		fmt.Printf("  TC (SchedCLS) program:   FAIL (%v)\n", err)
+		progOK = false
 	} else {
-		m.Close()
+		fmt.Println("  TC (SchedCLS) program:   OK")
+		prog.Close()
 	}
-	fmt.Printf("  Hash map: %s\n", mapResult)
+
+	// 3. Map creation
+	fmt.Println("\nBPF maps:")
+	mapOK := true
+	for _, mt := range []struct {
+		name string
+		typ  ebpf.MapType
+	}{
+		{"Hash", ebpf.Hash},
+		{"LPM trie", ebpf.LPMTrie},
+		{"Array", ebpf.Array},
+	} {
+		m, err := ebpf.NewMap(&ebpf.MapSpec{Type: mt.typ, KeySize: 4, ValueSize: 4, MaxEntries: 1})
+		if err != nil {
+			fmt.Printf("  %-12s: FAIL (%v)\n", mt.name, err)
+			mapOK = false
+		} else {
+			fmt.Printf("  %-12s: OK\n", mt.name)
+			m.Close()
+		}
+	}
+
+	// 4. Helpers test via small program verification
+	fmt.Println("\nBPF helper availability (via program load):")
+	helpers := []struct {
+		name string
+		prog *ebpf.ProgramSpec
+	}{
+		{"redirect", &ebpf.ProgramSpec{
+			Type: ebpf.SchedCLS,
+			Instructions: ebpf.Instructions{
+				ebpf.Mov.Imm(ebpf.Reg1, 1),
+				ebpf.Mov.Imm(ebpf.Reg2, 0),
+				ebpf.FnRedirect.Call(),
+				ebpf.Return(),
+			},
+			License: "GPL",
+		}},
+		{"sk_assign", &ebpf.ProgramSpec{
+			Type: ebpf.SchedCLS,
+			Instructions: ebpf.Instructions{
+				ebpf.Mov.Imm(ebpf.Reg1, 0),
+				ebpf.Mov.Imm(ebpf.Reg2, 0),
+				ebpf.Mov.Imm(ebpf.Reg3, 0),
+				ebpf.FnSkAssign.Call(),
+				ebpf.Return(),
+			},
+			License: "GPL",
+		}},
+	}
+	for _, h := range helpers {
+		p, err := ebpf.NewProgram(h.prog)
+		if err != nil {
+			fmt.Printf("  %-15s: FAIL (%v)\n", h.name, err)
+		} else {
+			fmt.Printf("  %-15s: OK\n", h.name)
+			p.Close()
+		}
+	}
 
 	// 5. TC attach capability
-	fmt.Println("\nTC attach test:")
-	tcResult := "OK"
+	fmt.Println("\nTC attach:")
 	iface, err := net.InterfaceByName("lo")
 	if err != nil {
-		tcResult = fmt.Sprintf("SKIP: cannot find lo: %v", err)
+		fmt.Printf("  clsact on lo: SKIP (cannot find lo: %v)\n", err)
 	} else {
 		qdisc := &netlink.Clsact{
 			QdiscAttrs: netlink.QdiscAttrs{
@@ -82,76 +117,84 @@ func CheckMain(args []string) {
 		}
 		if err := netlink.QdiscAdd(qdisc); err != nil {
 			if os.IsExist(err) {
-				tcResult = "OK (clsact already exists)"
+				fmt.Println("  clsact on lo: OK (already exists)")
 			} else {
-				tcResult = fmt.Sprintf("FAIL: %v", err)
+				fmt.Printf("  clsact on lo: FAIL (%v)\n", err)
 			}
 		} else {
 			netlink.QdiscDel(qdisc)
+			fmt.Println("  clsact on lo: OK")
 		}
 	}
-	fmt.Printf("  TC clsact on lo: %s\n", tcResult)
 
-	// 6. C compiler check
+	// 6. Build toolchain
 	fmt.Println("\nBuild toolchain:")
-	checkCommand("  clang", "clang")
-	checkHeaders("  BPF headers", []string{
+	clangOK := true
+	if _, err := exec.LookPath("clang"); err != nil {
+		fmt.Println("  clang:   NOT FOUND (needed to compile eBPF C program)")
+		clangOK = false
+	} else {
+		fmt.Println("  clang:   OK")
+	}
+	for _, h := range []string{
 		"/usr/include/linux/bpf.h",
 		"/usr/include/linux/if_ether.h",
+		"/usr/include/linux/pkt_cls.h",
 		"/usr/include/bpf/bpf_helpers.h",
-	})
-
-	// 7. Summary
-	fmt.Println("\n---")
-	allOK := loadResult == "OK" && mapResult == "OK" && strings.Contains(tcResult, "OK")
-	if allOK {
-		fmt.Println("eBPF support: YES — system is ready for ebpf inbound")
-	} else {
-		fmt.Println("eBPF support: NO — some capabilities are missing")
-	}
-}
-
-func loadTestProgram() (*ebpf.Program, error) {
-	spec := &ebpf.ProgramSpec{
-		Type: ebpf.SchedCLS,
-		Instructions: ebpf.Instructions{
-			// Load immediate 0
-			ebpf.Mov.Imm(ebpf.Reg0, 0),
-			// Return
-			ebpf.Return(),
-		},
-		License: "GPL",
-	}
-	return ebpf.NewProgram(spec)
-}
-
-func checkFeature(name string, ok bool) {
-	status := "OK"
-	if !ok {
-		status = "MISSING"
-	}
-	fmt.Printf("%-35s %s\n", name, status)
-}
-
-func checkCommand(name, cmd string) {
-	_, err := execLookPath(cmd)
-	if err != nil {
-		fmt.Printf("%-35s NOT FOUND\n", name)
-	} else {
-		fmt.Printf("%-35s OK\n", name)
-	}
-}
-
-func checkHeaders(name string, paths []string) {
-	for _, p := range paths {
-		if _, err := os.Stat(p); err != nil {
-			fmt.Printf("%-35s MISSING (%s)\n", name, p)
-			return
+	} {
+		if _, err := os.Stat(h); err != nil {
+			fmt.Printf("  %s: MISSING\n", h)
+			clangOK = false
 		}
 	}
-	fmt.Printf("%-35s OK\n", name)
+	if clangOK {
+		fmt.Println("  headers: OK")
+	}
+
+	// 7. Kernel config checks (optional)
+	fmt.Println("\nKernel config suggestions:")
+	for _, cfg := range []string{
+		"CONFIG_BPF=y",
+		"CONFIG_BPF_SYSCALL=y",
+		"CONFIG_BPF_JIT=y",
+		"CONFIG_DEBUG_INFO_BTF=y",
+	} {
+		checkKernelConfig(cfg)
+	}
+
+	// 8. Summary
+	fmt.Println("\n---")
+	if progOK && mapOK {
+		fmt.Println("eBPF support: YES (ready for ebpf inbound)")
+	} else {
+		fmt.Println("eBPF support: NO (required kernel features missing)")
+		fmt.Println("  Requirements: Linux >= 4.19 with CONFIG_BPF_SYSCALL=y, CONFIG_DEBUG_INFO_BTF=y")
+	}
 }
 
-func execLookPath(cmd string) (string, error) {
-	return exec.LookPath(cmd)
+func checkKernelConfig(name string) {
+	cfg := strings.TrimPrefix(name, "CONFIG_")
+	paths := []string{
+		"/proc/config.gz",
+		fmt.Sprintf("/boot/config-%s", unix.ByteSliceToString((&unix.Utsname{}).Release[:])),
+	}
+	_ = paths
+	// Best-effort: check /proc/config.gz
+	data, err := os.ReadFile("/proc/config.gz")
+	if err != nil {
+		// Try /boot/config-$(uname -r)
+		var uname unix.Utsname
+		unix.Uname(&uname)
+		release := unix.ByteSliceToString(uname.Release[:])
+		data, err = os.ReadFile(fmt.Sprintf("/boot/config-%s", release))
+	}
+	if err != nil {
+		fmt.Printf("  %-35s cannot check\n", name)
+		return
+	}
+	if strings.Contains(string(data), cfg) {
+		fmt.Printf("  %-35s OK\n", name)
+	} else {
+		fmt.Printf("  %-35s NOT SET\n", name)
+	}
 }
