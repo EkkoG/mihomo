@@ -1,8 +1,6 @@
 module github.com/metacubex/mihomo
 
-go 1.24.0
-
-toolchain go1.24.13
+go 1.21
 
 require (
 	github.com/bahlo/generic-list-go v0.2.0
