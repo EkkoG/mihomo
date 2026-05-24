@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/netip"
 	"os/exec"
+	"syscall"
 	"time"
 
 	C "github.com/metacubex/mihomo/constant"
