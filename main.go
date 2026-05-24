@@ -16,6 +16,7 @@ import (
 
 	"github.com/metacubex/mihomo/common/cmd"
 	"github.com/metacubex/mihomo/component/generator"
+	"github.com/metacubex/mihomo/listener/ebpf"
 	"github.com/metacubex/mihomo/component/geodata"
 	"github.com/metacubex/mihomo/component/updater"
 	"github.com/metacubex/mihomo/config"
@@ -84,7 +85,12 @@ func main() {
 
 	_, _ = maxprocs.Set(maxprocs.Logger(func(string, ...any) {}))
 
-	if len(os.Args) > 1 && os.Args[1] == "convert-ruleset" {
+	if len(os.Args) > 1 && os.Args[1] == "check-ebpf" {
+			ebpf.CheckMain(os.Args[2:])
+			return
+		}
+
+		if len(os.Args) > 1 && os.Args[1] == "convert-ruleset" {
 		provider.ConvertMain(os.Args[2:])
 		return
 	}
